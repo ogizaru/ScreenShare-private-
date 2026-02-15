@@ -230,9 +230,18 @@
             border-radius: 12px;
         }
 
-        #video-container:hover .control-overlay,
         #video-container.touch-active .control-overlay {
             opacity: 1;
+            pointer-events: auto;
+            /* Enable clicks when visible */
+        }
+
+        .control-overlay {
+            /* ... previous styles ... */
+            opacity: 0;
+            pointer-events: none;
+            /* Disable clicks when hidden */
+            transition: opacity 0.3s;
         }
 
         .overlay-btn {
@@ -344,7 +353,6 @@
         let statsInterval = null;
         let wakeLock = null;
         let pendingConnections = []; // Store data connections waiting for stream
-        let hostConnection = null; // Client: Connection to Host for sending Input
         let touchTimer; // OSD Timer
 
         // --- UI Elements ---
@@ -452,11 +460,6 @@
                                 console.log("Client requested stream but not ready. Sending wait...");
                                 conn.send({ type: 'wait' });
                             }
-                        } else if (data.type === 'input') {
-                            // Remote Control Input Log
-                            // Browser security prevents actual execution, but we log coordinates.
-                            // A companion script could read these logs or listen to a websocket.
-                            console.log(`[Remote Input] ${data.event} button:${data.button} x:${data.x} y:${data.y}`);
                         }
                     });
 
@@ -615,80 +618,102 @@
         }
 
         // --- OSD & Remote Control Logic ---
+        let osdLock = false; // Prevents OSD from showing immediately after hide
 
-        // 1. OSD Toggle (Tap/Click to show/hide)
-        videoContainer.addEventListener('click', (e) => {
-            // Ignore clicks on buttons
-            if (e.target.closest('button')) return;
+        // 1. Core OSD Functions
+        function showOSD() {
+            if (osdLock) return; // LOCKED: Do not show
+            videoContainer.classList.add('touch-active');
+            resetAutoHide();
+        }
 
-            // Toggle visibility class
+        function hideOSD() {
+            videoContainer.classList.remove('touch-active');
+            clearTimeout(touchTimer);
+
+            // LOCK for 1 second to prevent immediate re-trigger by stray events
+            osdLock = true;
+            setTimeout(() => {
+                osdLock = false;
+            }, 1000);
+        }
+
+        function toggleOSD() {
             if (videoContainer.classList.contains('touch-active')) {
-                videoContainer.classList.remove('touch-active');
+                hideOSD();
             } else {
-                videoContainer.classList.add('touch-active');
-                // Auto-hide after 3s
-                clearTimeout(touchTimer);
-                touchTimer = setTimeout(() => {
-                    videoContainer.classList.remove('touch-active');
-                }, 3000);
+                showOSD();
             }
+        }
+
+        function resetAutoHide() {
+            clearTimeout(touchTimer);
+            touchTimer = setTimeout(hideOSD, 3000);
+        }
+
+        // 2. Event Listeners
+
+        // Background Tap/Click -> Toggle
+        videoContainer.addEventListener('click', (e) => {
+            // Toggle only if not locked
+            toggleOSD();
         });
 
-        // 1.5 Explicit Hide Button Logic (Aggressive Stop Propagation)
+        // Control Container -> BLOCK Propagation
+        const controlOverlay = document.querySelector('.control-overlay');
+        if (controlOverlay) {
+            const stopProp = (e) => { e.stopPropagation(); };
+
+            controlOverlay.addEventListener('click', stopProp);
+            controlOverlay.addEventListener('pointerdown', stopProp);
+            controlOverlay.addEventListener('mousedown', stopProp);
+            controlOverlay.addEventListener('touchstart', stopProp);
+        }
+
+        // Explicit Hide Button
         const hideBtn = document.getElementById('hide-controls-btn');
         if (hideBtn) {
-            const handleHide = (e) => {
-                // Stop everything
-                e.stopPropagation();
-                e.stopImmediatePropagation();
-                e.preventDefault();
-
-                // Force Hide
-                videoContainer.classList.remove('touch-active');
-
-                // Clear any auto-hide timer so it doesn't weirdly fire later
-                clearTimeout(touchTimer);
-            };
-
-            // Listen on multiple phases to catch it early and covering all device types
-            hideBtn.addEventListener('click', handleHide, { capture: true });
-            hideBtn.addEventListener('pointerdown', handleHide, { capture: true });
-            hideBtn.addEventListener('touchstart', handleHide, { capture: true, passive: false });
+            hideBtn.addEventListener('click', (e) => {
+                hideOSD(); // This now triggers the 1s LOCK
+            });
         }
+        // 3. Remote Control (Capture & Send) - REMOVED
+        // remoteVideo.addEventListener('pointerdown', handleInput); - REMOVED
+        // remoteVideo.addEventListener('pointermove', handleInput); - REMOVED
+        // remoteVideo.addEventListener('pointerup', handleInput); - REMOVED
 
-        // 2. Remote Control (Capture & Send)
-        // Send input from Client to Host
-        remoteVideo.addEventListener('pointerdown', handleInput);
-        remoteVideo.addEventListener('pointermove', handleInput);
-        remoteVideo.addEventListener('pointerup', handleInput);
+        // function handleInput(e) { - REMOVED
+        //     // Only send input if connected - REMOVED
+        //     if (!hostConnection || !hostConnection.open) return; - REMOVED
 
-        function handleInput(e) {
-            // Only send input if we are the CLIENT and connected
-            // Note: we check hostConnection (DataConnection) to send data
-            if (!hostConnection || !hostConnection.open) return;
+        //     // Rate limit pointermove - REMOVED
+        //     if (e.type === 'pointermove' && Math.random() > 0.1) return; - REMOVED
 
-            // Rate limit pointermove (simple random filter for demo)
-            if (e.type === 'pointermove' && Math.random() > 0.1) return;
+        //     // If OSD is visible, maybe we should NOT send input if clicking controls? - REMOVED
+        //     // But controls stop propagation, so this listener on remoteVideo (which is sibling/child?) - REMOVED
+        //     // remoteVideo is sibling of control-overlay (in HTML). - REMOVED
+        //     // If z-index is right, controls are on top. - REMOVED
 
-            const rect = remoteVideo.getBoundingClientRect();
+        //     const rect = remoteVideo.getBoundingClientRect(); - REMOVED
+        //     let x = (e.clientX - rect.left) / rect.width; - REMOVED
+        //     let y = (e.clientY - rect.top) / rect.height; - REMOVED
+        //     x = Math.max(0, Math.min(1, x)); - REMOVED
+        //     y = Math.max(0, Math.min(1, y)); - REMOVED
 
-            // Normalize coordinates (0.0 to 1.0)
-            // Ensure within bounds
-            let x = (e.clientX - rect.left) / rect.width;
-            let y = (e.clientY - rect.top) / rect.height;
-            x = Math.max(0, Math.min(1, x));
-            y = Math.max(0, Math.min(1, y));
+        //     const inputData = { - REMOVED
+        //         type: 'input', - REMOVED
+        //         event: e.type, - REMOVED
+        //         x: x.toFixed(4), - REMOVED
+        //         y: y.toFixed(4), - REMOVED
+        //         button: e.button - REMOVED
+        //     }; - REMOVED
+        //     hostConnection.send(inputData); - REMOVED
 
-            const inputData = {
-                type: 'input',
-                event: e.type,
-                x: x.toFixed(4),
-                y: y.toFixed(4),
-                button: e.button
-            };
-
-            hostConnection.send(inputData);
-        }
+        //     // If we are touching video to control, we probably don't want OSD to hide immediately - REMOVED
+        //     // resetAutoHide(); // Optional: keep OSD alive while controlling? - REMOVED
+        //     // Actually, user might want to hide OSD to see full screen while controlling. - REMOVED
+        //     // So let's NOT reset timer on input. - REMOVED
+        // } - REMOVED
 
 
         // --- Optimization Logic (Existing) ---
