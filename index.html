@@ -634,6 +634,28 @@
             }
         });
 
+        // 1.5 Explicit Hide Button Logic (Aggressive Stop Propagation)
+        const hideBtn = document.getElementById('hide-controls-btn');
+        if (hideBtn) {
+            const handleHide = (e) => {
+                // Stop everything
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+                e.preventDefault();
+
+                // Force Hide
+                videoContainer.classList.remove('touch-active');
+
+                // Clear any auto-hide timer so it doesn't weirdly fire later
+                clearTimeout(touchTimer);
+            };
+
+            // Listen on multiple phases to catch it early and covering all device types
+            hideBtn.addEventListener('click', handleHide, { capture: true });
+            hideBtn.addEventListener('pointerdown', handleHide, { capture: true });
+            hideBtn.addEventListener('touchstart', handleHide, { capture: true, passive: false });
+        }
+
         // 2. Remote Control (Capture & Send)
         // Send input from Client to Host
         remoteVideo.addEventListener('pointerdown', handleInput);
