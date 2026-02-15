@@ -193,6 +193,8 @@
             height: 100%;
             background: black;
             z-index: 100;
+            touch-action: none;
+            /* Prevent default touch actions like scroll/zoom */
         }
 
         video {
@@ -335,6 +337,8 @@
         let statsInterval = null;
         let wakeLock = null;
         let pendingConnections = []; // Store data connections waiting for stream
+        let hostConnection = null; // Client: Connection to Host for sending Input
+        let touchTimer; // OSD Timer
 
         // --- UI Elements ---
         const myIdInput = document.getElementById('my-peer-id');
@@ -395,7 +399,7 @@
                 console.log("Receiving call from:", call.peer);
 
                 if (localStream) {
-                    // We are HOST: A client is calling us (should not happen in this flow usually, but backup)
+                    // We are HOST: A client is calling us
                     hostStatus.innerText = "Client Connecting...";
                     hostStatus.style.color = "#fbbf24";
 
@@ -408,30 +412,28 @@
                     });
                     setupCallEvents(call, 'host');
                 } else {
-                    // We are CLIENT: The host is calling us with the stream
+                    // We are CLIENT receiving stream
                     console.log("Accepting incoming stream as Client");
                     clientStatus.innerText = "Receiving Stream...";
-
-                    call.answer(); // Answer to accept connection (receive-only)
+                    call.answer();
                     setupCallEvents(call, 'client');
                 }
             });
 
-            // Handle Data Connections (Signaling/Handshake)
+            // Handle Data Connections (Signaling/Handshake/Input)
             myPeer.on('connection', (conn) => {
                 console.log("Data connection received from:", conn.peer);
 
                 conn.on('open', () => {
-                    // Add to pending list
                     if (!pendingConnections.find(c => c.peer === conn.peer)) {
                         pendingConnections.push(conn);
                     }
 
                     conn.on('data', (data) => {
+                        // Protocol: request-stream, wait, input
                         if (data.type === 'request-stream') {
                             if (localStream) {
                                 console.log("Client requested stream. Calling back...");
-                                // Force Codec on Offer side too
                                 const targetCodec = document.getElementById('codec-select').value;
                                 const call = myPeer.call(conn.peer, localStream, {
                                     sdpTransform: (sdp) => {
@@ -443,6 +445,11 @@
                                 console.log("Client requested stream but not ready. Sending wait...");
                                 conn.send({ type: 'wait' });
                             }
+                        } else if (data.type === 'input') {
+                            // Remote Control Input Log
+                            // Browser security prevents actual execution, but we log coordinates.
+                            // A companion script could read these logs or listen to a websocket.
+                            console.log(`[Remote Input] ${data.event} button:${data.button} x:${data.x} y:${data.y}`);
                         }
                     });
 
@@ -475,10 +482,8 @@
                 hostStatus.innerText = "Capturing Screen. Waiting for Client...";
                 hostStatus.style.color = "#4ade80"; // Green
 
-                // Check for pending connections and call them back
                 if (pendingConnections.length > 0) {
                     console.log(`Calling back ${pendingConnections.length} pending clients...`);
-                    // Force codec for pending connections
                     const targetCodec = document.getElementById('codec-select').value;
                     pendingConnections.forEach(conn => {
                         if (conn.open) {
@@ -493,7 +498,6 @@
                     hostStatus.innerText = "Connecting to pending clients...";
                 }
 
-                // Handle Stop Sharing
                 localStream.getVideoTracks()[0].onended = () => {
                     hostStatus.innerText = "Sharing Stopped";
                     hostStatus.style.color = "";
@@ -519,7 +523,6 @@
                 reliable: true
             });
 
-            // Connection Timeout
             const timeout = setTimeout(() => {
                 if (!conn.open) {
                     clientStatus.innerText = "Connection Timeout";
@@ -527,11 +530,12 @@
                     alert("Connection timed out. Check ID or Firewall.");
                     conn.close();
                 }
-            }, 10000); // 10s timeout
+            }, 10000);
 
             conn.on('open', () => {
                 clearTimeout(timeout);
                 clientStatus.innerText = "Signaling Established. Requesting Stream...";
+                hostConnection = conn; // Store for Input Sending
                 conn.send({ type: 'request-stream' });
             });
 
@@ -545,6 +549,7 @@
             conn.on('close', () => {
                 clearTimeout(timeout);
                 console.log("Signaling closed");
+                hostConnection = null;
             });
 
             conn.on('error', err => {
@@ -559,8 +564,6 @@
         function setupCallEvents(call, role) {
             activeCall = call;
 
-            // Wait for MediaConnection to expose the underlying RTCPeerConnection
-            // PeerJS sets this property a bit asynchronously sometimes
             const checkPcInterval = setInterval(() => {
                 if (call.peerConnection) {
                     clearInterval(checkPcInterval);
@@ -604,13 +607,65 @@
             });
         }
 
-        // --- Optimization Logic ---
+        // --- OSD & Remote Control Logic ---
+
+        // 1. OSD Toggle (Tap/Click to show/hide)
+        videoContainer.addEventListener('click', (e) => {
+            // Ignore clicks on buttons
+            if (e.target.closest('button')) return;
+
+            // Toggle visibility class
+            if (videoContainer.classList.contains('touch-active')) {
+                videoContainer.classList.remove('touch-active');
+            } else {
+                videoContainer.classList.add('touch-active');
+                // Auto-hide after 3s
+                clearTimeout(touchTimer);
+                touchTimer = setTimeout(() => {
+                    videoContainer.classList.remove('touch-active');
+                }, 3000);
+            }
+        });
+
+        // 2. Remote Control (Capture & Send)
+        // Send input from Client to Host
+        remoteVideo.addEventListener('pointerdown', handleInput);
+        remoteVideo.addEventListener('pointermove', handleInput);
+        remoteVideo.addEventListener('pointerup', handleInput);
+
+        function handleInput(e) {
+            // Only send input if we are the CLIENT and connected
+            // Note: we check hostConnection (DataConnection) to send data
+            if (!hostConnection || !hostConnection.open) return;
+
+            // Rate limit pointermove (simple random filter for demo)
+            if (e.type === 'pointermove' && Math.random() > 0.1) return;
+
+            const rect = remoteVideo.getBoundingClientRect();
+
+            // Normalize coordinates (0.0 to 1.0)
+            // Ensure within bounds
+            let x = (e.clientX - rect.left) / rect.width;
+            let y = (e.clientY - rect.top) / rect.height;
+            x = Math.max(0, Math.min(1, x));
+            y = Math.max(0, Math.min(1, y));
+
+            const inputData = {
+                type: 'input',
+                event: e.type,
+                x: x.toFixed(4),
+                y: y.toFixed(4),
+                button: e.button
+            };
+
+            hostConnection.send(inputData);
+        }
+
+
+        // --- Optimization Logic (Existing) ---
 
         async function applyHostOptimizations(pc) {
             const bitrate = parseInt(document.getElementById('bitrate-input').value) || 10;
-
-            // Use SDP Munging for initial selection, but verify here.
-            // Degradation Preference still useful for resolution lock.
             await new Promise(r => setTimeout(r, 500));
 
             const senders = pc.getSenders();
@@ -619,12 +674,8 @@
             if (videoSender) {
                 const params = videoSender.getParameters();
                 if (!params.encodings) params.encodings = [{}];
-
-                // 1. Bitrate Settings
                 params.encodings[0].maxBitrate = bitrate * 1000000;
                 params.encodings[0].networkPriority = 'high';
-
-                // 2. Resolution Fix (CRITICAL)
                 params.degradationPreference = 'maintain-resolution';
                 params.encodings[0].scaleResolutionDownBy = 1.0;
 
@@ -639,7 +690,6 @@
         }
 
         function applyClientOptimizations(pc) {
-            // Apply Low Latency Hints
             pc.ontrack = (e) => {
                 if (e.receiver) {
                     if (e.receiver.playoutDelayHint !== undefined) {
@@ -653,7 +703,7 @@
             };
         }
 
-        // --- SDP Munging Helper (Universal force codec) ---
+        // --- SDP Munging Helper ---
         function forceCodec(sdp, codec) {
             if (!codec || codec === 'VP8') return sdp; // Default
 
@@ -663,7 +713,6 @@
             const lines = sdp.split('\r\n');
             let mLineIndex = -1;
 
-            // Find video media line
             for (let i = 0; i < lines.length; i++) {
                 if (lines[i].startsWith('m=video')) {
                     mLineIndex = i;
@@ -673,49 +722,31 @@
 
             if (mLineIndex === -1) return sdp;
 
-            // Parse Payload Types for the desired codec
-            // Format: a=rtpmap:<payload> <codec>/<clock>...
             const payloadTypes = [];
-
-            // Search all rtpmap lines
             lines.forEach(line => {
                 if (line.startsWith('a=rtpmap:')) {
                     const parts = line.split(' ');
-                    // parts[1] is like "AV1/90000"
                     if (parts.length < 2) return;
                     const match = parts[1].split('/');
                     if (match[0].toUpperCase() === codec.toUpperCase()) {
-                        // Extract payload type from "a=rtpmap:96" -> "96"
                         const pt = parts[0].split(':')[1];
                         payloadTypes.push(pt);
                     }
                 }
             });
 
-            if (payloadTypes.length === 0) {
-                console.warn(`Codec ${codec} not found in SDP. Cannot force.`);
-                return sdp;
-            }
+            if (payloadTypes.length === 0) return sdp;
 
-            // Reorder m=video line
-            // m=video <port> <proto> <pt1> <pt2> ...
             const mLineParts = lines[mLineIndex].split(' ');
-            // mLineParts[0]=m=video, [1]=port, [2]=proto, [3+]=pts
-
-            // Remove desired PTs from existing list to avoid duplication
             const otherPTs = mLineParts.slice(3).filter(pt => !payloadTypes.includes(pt));
 
             const newMLine = [
-                mLineParts[0],
-                mLineParts[1],
-                mLineParts[2],
-                ...payloadTypes, // Put desired codec PTs first
-                ...otherPTs      // Rest
+                mLineParts[0], mLineParts[1], mLineParts[2],
+                ...payloadTypes, ...otherPTs
             ].join(' ');
 
             lines[mLineIndex] = newMLine;
-
-            console.log(`SDP Codec Priority Rewritten: ${codec} (PT: ${payloadTypes.join(',')})`);
+            console.log(`SDP Codec Priority Rewritten: ${codec}`);
             return lines.join('\r\n');
         }
 
@@ -726,7 +757,6 @@
 
             statsInterval = setInterval(async () => {
                 if (!peerConnection || peerConnection.connectionState !== 'connected') return;
-
                 const stats = await peerConnection.getStats();
                 let codec = '';
                 let resolution = '';
@@ -755,10 +785,7 @@
             remoteVideo.srcObject = null;
             if (statsInterval) clearInterval(statsInterval);
             clientStatus.innerText = "Disconnected";
-
-            if (wakeLock) {
-                wakeLock.release().then(() => wakeLock = null);
-            }
+            if (wakeLock) wakeLock.release().then(() => wakeLock = null);
         }
 
         function copyId() {
@@ -784,19 +811,6 @@
                     console.log(err);
                 }
             }
-        }
-
-        // Mouse Activity for Controls
-        let touchTimer;
-        videoContainer.addEventListener('mousemove', showControls);
-        videoContainer.addEventListener('touchstart', showControls, { passive: true });
-
-        function showControls() {
-            videoContainer.classList.add('touch-active');
-            clearTimeout(touchTimer);
-            touchTimer = setTimeout(() => {
-                videoContainer.classList.remove('touch-active');
-            }, 3000);
         }
     </script>
 </body>
