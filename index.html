@@ -230,13 +230,15 @@
             border-radius: 12px;
         }
 
-        #video-container.touch-active .control-overlay {
+        #video-container.touch-active .control-overlay,
+        #video-container.touch-active .stats-overlay {
             opacity: 1;
             pointer-events: auto;
             /* Enable clicks when visible */
         }
 
-        .control-overlay {
+        .control-overlay,
+        .stats-overlay {
             /* ... previous styles ... */
             opacity: 0;
             pointer-events: none;
